@@ -22,8 +22,9 @@ py stack_update.py --apply --branch 8.4 move to another branch (php.ini carried 
 py stack_update.py --apply --reinstall  re-run the pipeline on the installed version
 ```
 
-A weekly Task Scheduler entry ("XAMPP stack check", Mondays 09:00) runs the check
-in its own window; the window stays open with the report.
+A weekly Task Scheduler entry ("XAMPP stack check", Mondays 09:00, interactive)
+runs the check in its own window, which stays open with the report. The task
+calls python.exe by full path: Task Scheduler cannot resolve the `py` alias.
 
 Downloads and staging folders live in `C:\xampp\updates`. The rollback copy is
 `C:\xampp\php-<old version>.bak` (robocopy it back over `C:\xampp\php` with `/MIR`,
