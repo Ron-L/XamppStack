@@ -12,6 +12,7 @@ so XAMPP's own php.ini with its timezone / extension list stays).
     py stack_update.py --apply --dry-run   everything except stop/swap/start
     py stack_update.py --apply --branch 8.4   move to another branch (vs17 build)
     py stack_update.py --apply --reinstall    re-run the pipeline on the installed version
+    py stack_update.py --smoke                the post-swap smoke test alone, on the current install
 
 Why the loader check: Apache resolves an extension's helper DLLs from its own
 bin folder, not from C:\\xampp\\php, and its copies are from 2023. PHP 8.2.35's
@@ -463,7 +464,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="with --apply: everything except the swap")
     ap.add_argument("--branch", help="PHP branch to install, e.g. 8.4 (default: the installed branch)")
     ap.add_argument("--reinstall", action="store_true", help="with --apply: run even when already current")
+    ap.add_argument("--smoke", action="store_true",
+                    help="run the post-swap smoke test against the CURRENT install and stop")
     a = ap.parse_args()
+    if a.smoke:
+        # The one step a dry run never reaches; prove it before it matters
+        # (2026-11-02: a wrong smoke test rolled back a good swap).
+        v, _vs, _built = installed_build()
+        sys.exit(0 if smoke(plain(v)) else "smoke test FAILED against the current install")
     if a.apply:
         apply(a.branch, a.dry_run, a.reinstall)
     elif check():

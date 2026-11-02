@@ -20,7 +20,11 @@ py stack_update.py --apply              download, verify SHA-256, stage, loader 
 py stack_update.py --apply --dry-run    everything except the swap
 py stack_update.py --apply --branch 8.4 move to another branch (php.ini carried over)
 py stack_update.py --apply --reinstall  re-run the pipeline on the installed version
+py stack_update.py --smoke              the post-swap smoke test alone, on the current install
 ```
+
+A dry run exercises everything except the swap and the smoke test that follows it;
+run `--smoke` once before a real `--apply` so that step is proven too.
 
 A weekly Task Scheduler entry ("XAMPP stack check", Mondays 09:00, interactive)
 runs the check in its own window, which stays open with the report. The task
