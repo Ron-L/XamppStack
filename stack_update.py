@@ -358,16 +358,30 @@ def copy_tree(src, dst):
     return n
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def smoke(expected):
+    # php -v, then the FIRST response from the site root. XAMPP's root is a
+    # PHP page that 302s to the static /dashboard/, so redirects must not be
+    # followed (2026-11-02: following them read a header-less static page and
+    # rolled a good swap back). Apache stamps PHP's version in both the
+    # Server and X-Powered-By headers; either one counts.
     v, _vs = installed_php()
     say("php -v    %s" % v)
     ok = v == expected
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=INSECURE))
+    req = urllib.request.Request(SMOKE_URL, headers={"User-Agent": "stack_update.py"})
     try:
-        req = urllib.request.Request(SMOKE_URL, headers={"User-Agent": "stack_update.py"})
-        with urllib.request.urlopen(req, timeout=20, context=INSECURE) as r:
-            hdr = r.headers.get("X-Powered-By", "")
-            say("site      HTTP %s  X-Powered-By: %s" % (r.status, hdr))
-            ok = ok and expected in hdr
+        try:
+            r = opener.open(req, timeout=20)
+        except urllib.error.HTTPError as e:
+            r = e                                  # a 3xx/4xx still carries the headers
+        hdr = r.headers.get("X-Powered-By", "") or r.headers.get("Server", "")
+        say("site      HTTP %s  %s" % (r.status, hdr))
+        ok = ok and ("PHP/" + expected) in hdr
     except Exception as e:
         say("site      FAILED: %s" % e)
         ok = False
