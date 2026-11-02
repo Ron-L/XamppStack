@@ -26,6 +26,13 @@ A weekly Task Scheduler entry ("XAMPP stack check", Mondays 09:00, interactive)
 runs the check in its own window, which stays open with the report. The task
 calls python.exe by full path: Task Scheduler cannot resolve the `py` alias.
 
+The check reads php.net's **Windows** feed (`backend/win-releases.json`), not the
+source-release feed: Windows binaries get rebuilt under the same PHP version when a
+bundled library is fixed (26 Oct 2026: `8.2.35` → `8.2.35-1` for Brotli
+CVE-2026-111497), and only the Windows feed shows it. The installed build is
+recorded in `C:\xampp\php\stack_update.json` at swap time; an install made by hand
+is judged by the build stamp in `snapshot.txt`.
+
 Downloads and staging folders live in `C:\xampp\updates`. The rollback copy is
 `C:\xampp\php-<old version>.bak` (robocopy it back over `C:\xampp\php` with `/MIR`,
 then start `Apache2.4`). Delete the `.bak` after a week of normal running.

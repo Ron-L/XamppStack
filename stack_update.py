@@ -27,6 +27,8 @@ it back over C:\\xampp\\php, then start Apache2.4).
 import argparse
 import ctypes
 import hashlib
+from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 import io
 import json
 import os
@@ -58,12 +60,19 @@ XAMPP_CONF = os.path.join(XAMPP, "apache", "conf", "extra", "httpd-xampp.conf")
 ERROR_LOG = os.path.join(XAMPP, "apache", "logs", "error.log")
 UPDATES = os.path.join(XAMPP, "updates")           # downloads + staging live here
 SERVICE = "Apache2.4"
-RELEASES = "https://www.php.net/releases/index.php?json&version=%s"
+# The WINDOWS feed, not the source-release feed: Windows binaries get rebuilt
+# with the same PHP version when a bundled library is fixed (2026-10-26:
+# 8.2.35 -> 8.2.35-1 for Brotli CVE-2026-111497). The source feed never
+# changes for those, so a check keyed on it stays green while the server
+# runs the bad build. This feed names the build ("8.2.35-1"), the zip and
+# its SHA-256.
+WIN_FEED = "https://www.php.net/backend/win-releases.json"
 WIN_RELEASES = "https://windows.php.net/downloads/releases/"
 WIN_ARCHIVES = "https://windows.php.net/downloads/releases/archives/"
 APACHE_LOUNGE = "https://www.apachelounge.com/download/"
 SMOKE_URL = "https://localhost/"
-VS_FOR_BRANCH = {"8.2": "vs16"}                    # 8.3 and later are vs17 builds
+MARKER = os.path.join(PHP_DIR, "stack_update.json")   # which BUILD is installed (written at swap)
+SNAPSHOT = os.path.join(PHP_DIR, "snapshot.txt")      # php.net build stamp (fallback for hand installs)
 
 INSECURE = ssl.create_default_context()
 INSECURE.check_hostname = False
@@ -95,7 +104,14 @@ def is_admin():
 
 
 def vtuple(v):
-    return tuple(int(x) for x in v.split("."))
+    # "8.4.27-1" -> (8, 4, 27, 1); "8.4.27" -> (8, 4, 27, 0)
+    core, _, rebuild = v.partition("-")
+    return tuple(int(x) for x in core.split(".")) + (int(rebuild or 0),)
+
+
+def plain(build):
+    # "8.2.35-1" -> "8.2.35" (what php -v and the Server header show)
+    return build.partition("-")[0]
 
 
 # --- what is installed / what is current -------------------------------------
@@ -108,9 +124,54 @@ def installed_php():
     return (m.group(1) if m else "?"), vs
 
 
-def latest_php(branch):
-    d = json.loads(fetch(RELEASES % branch))
-    return d["version"], d.get("date", "")
+def installed_build():
+    # The exact build in C:\xampp\php: the marker this script writes at swap
+    # time, else (a hand install) the version plus the php.net build stamp
+    # from snapshot.txt, so a rebuild can still be told from its date.
+    version, vs = installed_php()
+    built = None
+    try:
+        with open(MARKER, encoding="utf-8") as f:
+            return json.load(f)["build"], vs, None
+    except (OSError, KeyError, ValueError):
+        pass
+    try:
+        with open(SNAPSHOT, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"generated on\s+(.+)", f.read())
+        if m:
+            built = parsedate_to_datetime(m.group(1).strip())
+    except OSError:
+        pass
+    return version, vs, built
+
+
+def latest_build(branch, vs):
+    # The current Windows build for a branch from the Windows feed:
+    # {"build": "8.2.35-1", "zip": "php-8.2.35-1-Win32-vs16-x64.zip",
+    #  "sha256": ..., "mtime": datetime}. Thread-safe x64 only.
+    d = json.loads(fetch(WIN_FEED))
+    if branch not in d:
+        raise SystemExit("branch %s is not in the Windows feed (%s)" % (branch, ", ".join(sorted(d))))
+    e = d[branch]
+    keys = [k for k in e if k.startswith("ts-") and k.endswith("-x64")]
+    if not keys:
+        raise SystemExit("no thread-safe x64 build listed for %s" % branch)
+    key = "ts-%s-x64" % vs if "ts-%s-x64" % vs in keys else keys[0]
+    z = e[key]["zip"]
+    return {"build": e["version"], "zip": z["path"], "sha256": z["sha256"].lower(),
+            "mtime": datetime.fromisoformat(e[key]["mtime"]), "vs": key.split("-")[1]}
+
+
+def is_behind(installed, built, latest):
+    # installed: "8.2.35" or "8.2.35-1"; built: snapshot datetime or None.
+    # A later version is behind; so is the same version when the feed shows a
+    # rebuild ("-1") and our build predates it (the stamp is minutes before
+    # the upload, so a day of slack is safe).
+    if vtuple(plain(installed)) < vtuple(plain(latest["build"])):
+        return True
+    if "-" in installed or "-" not in latest["build"]:
+        return vtuple(installed) < vtuple(latest["build"])
+    return built is not None and built < latest["mtime"] - timedelta(days=1)
 
 
 def installed_apache():
@@ -129,17 +190,18 @@ def latest_apache():
 
 
 def check():
-    v, vs = installed_php()
-    branch = ".".join(v.split(".")[:2])
+    v, vs, built = installed_build()
+    branch = ".".join(plain(v).split(".")[:2])
     behind = False
-    say("PHP installed : %s (%s, thread safe)" % (v, vs))
+    say("PHP installed : %s (%s, thread safe%s)"
+        % (v, vs, ", built %s" % built.strftime("%d %b %Y") if built else ""))
     for b in sorted({branch, "8.4"}, key=vtuple):
-        lv, date = latest_php(b)
+        lb = latest_build(b, vs if b == branch else "vs17")
         mark = ""
         if b == branch:
-            mark = "  <- current branch, UP TO DATE" if vtuple(lv) <= vtuple(v) else "  <- current branch, BEHIND"
-            behind = behind or vtuple(lv) > vtuple(v)
-        say("PHP %s latest: %s (%s)%s" % (b, lv, date, mark))
+            behind = is_behind(v, built, lb)
+            mark = "  <- current branch, " + ("BEHIND" if behind else "UP TO DATE")
+        say("PHP %s latest: %s (%s)%s" % (b, lb["build"], lb["mtime"].strftime("%d %b %Y"), mark))
     if branch == "8.2":
         say("NOTE: PHP 8.2 security support ends 2026-12-31 -- move to 8.4 before then")
     a = installed_apache()
@@ -152,40 +214,34 @@ def check():
 
 # --- download, verify, stage -------------------------------------------------
 
-def zip_name(version, branch):
-    return "php-%s-Win32-%s-x64.zip" % (version, VS_FOR_BRANCH.get(branch, "vs17"))
-
-
-def published_sha(name):
-    for base in (WIN_RELEASES, WIN_ARCHIVES):
-        try:
-            for line in fetch(base + "sha256sum.txt").splitlines():
-                if line.strip().endswith(name):
-                    return line.split()[0].lower(), base
-        except Exception:
-            pass
-    raise SystemExit("no published SHA-256 found for " + name)
-
-
-def download(version, branch):
+def download(latest):
+    # The zip the Windows feed names, with the SHA-256 it publishes. Current
+    # builds sit in releases/; one that has just been superseded, in archives/.
     os.makedirs(UPDATES, exist_ok=True)
-    name = zip_name(version, branch)
-    sha, base = published_sha(name)
+    name = latest["zip"]
     path = os.path.join(UPDATES, name)
     if not os.path.exists(path):
-        say("downloading %s" % (base + name))
+        for base in (WIN_RELEASES, WIN_ARCHIVES):
+            try:
+                say("downloading %s" % (base + name))
+                data = fetch(base + name, binary=True, timeout=600)
+                break
+            except Exception as e:
+                say("  not there (%s)" % e)
+        else:
+            raise SystemExit("could not download " + name)
         with open(path, "wb") as f:
-            f.write(fetch(base + name, binary=True, timeout=600))
+            f.write(data)
     got = hashlib.sha256(open(path, "rb").read()).hexdigest()
-    if got != sha:
+    if got != latest["sha256"]:
         os.remove(path)
         raise SystemExit("SHA-256 mismatch for %s -- deleted; run again" % name)
     say("verified  %s  (SHA-256 matches php.net)" % name)
     return path
 
 
-def stage(zip_path, version):
-    folder = os.path.join(UPDATES, "php-%s-stage" % version)
+def stage(zip_path, build):
+    folder = os.path.join(UPDATES, "php-%s-stage" % build)
     if os.path.isdir(folder):
         shutil.rmtree(folder)
     zipfile.ZipFile(zip_path).extractall(folder)
@@ -277,8 +333,8 @@ def wait_state(word, tries=60):
     return False
 
 
-def backup(old_version):
-    dest = os.path.join(XAMPP, "php-%s.bak" % old_version)
+def backup(old_build):
+    dest = os.path.join(XAMPP, "php-%s.bak" % old_build)
     if os.path.isdir(dest):
         say("backup    %s already exists -- kept" % dest)
         return dest
@@ -328,19 +384,28 @@ def startup_warnings(since_size):
     return [line.strip()[:160] for line in tail.splitlines() if "PHP Startup" in line]
 
 
+def write_marker(build, zip_name):
+    with open(MARKER, "w", encoding="utf-8") as f:
+        json.dump({"build": build, "zip": zip_name,
+                   "installed": datetime.now().isoformat(timespec="seconds"),
+                   "by": os.path.basename(__file__)}, f, indent=1)
+
+
 def apply(branch, dry_run, reinstall):
-    old, old_vs = installed_php()
-    branch = branch or ".".join(old.split(".")[:2])
-    new, _date = latest_php(branch)
-    if vtuple(new) <= vtuple(old) and not reinstall:
+    old, old_vs, built = installed_build()
+    old_branch = ".".join(plain(old).split(".")[:2])
+    branch = branch or old_branch
+    latest = latest_build(branch, old_vs if branch == old_branch else "vs17")
+    new = latest["build"]
+    if branch == old_branch and not is_behind(old, built, latest) and not reinstall:
         say("PHP %s is current for branch %s -- nothing to do (use --reinstall to re-run the pipeline)"
             % (old, branch))
         return
-    if branch != ".".join(old.split(".")[:2]):
+    if branch != old_branch:
         say("branch move %s -> %s: php.ini is carried over unchanged; compare it with the new\n"
             "php.ini-production afterwards for settings that changed or went away" % (old, new))
-    say("update    PHP %s -> %s" % (old, new))
-    zip_path = download(new, branch)
+    say("update    PHP %s%s -> %s" % (old, " (built %s)" % built.strftime("%d %b %Y") if built else "", new))
+    zip_path = download(latest)
     staged = stage(zip_path, new)
     failures = loader_check(staged)
     if failures:
@@ -358,6 +423,7 @@ def apply(branch, dry_run, reinstall):
     if not wait_state("STOPPED"):
         raise SystemExit("Apache did not stop")
     say("copying   %d files" % copy_tree(staged, PHP_DIR))
+    write_marker(new, latest["zip"])
     say("starting  %s" % SERVICE)
     sc("start", SERVICE)
     started = wait_state("RUNNING")
@@ -365,14 +431,14 @@ def apply(branch, dry_run, reinstall):
     warnings = startup_warnings(log_size)
     for w in warnings:
         say("  log: " + w)
-    if started and smoke(new) and not warnings:
+    if started and smoke(plain(new)) and not warnings:
         say("DONE: PHP %s is live. Rollback copy: %s (delete after a week of normal running)" % (new, bak))
         return
     say("PROBLEM after the swap -- rolling back to %s" % old)
     sc("stop", SERVICE)
     wait_state("STOPPED")
     subprocess.run(["robocopy", bak, PHP_DIR, "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/R:1", "/W:1"],
-                   capture_output=True)
+                   capture_output=True)          # /MIR also removes the new marker
     sc("start", SERVICE)
     raise SystemExit("rolled back to PHP %s; Apache %s" % (old, "running" if wait_state("RUNNING") else "NOT RUNNING"))
 
