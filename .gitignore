@@ -1,4 +1,9 @@
 __pycache__/
 
-# Claude Code's "Yes, and don't ask again" approvals (may hold a command's password) — never commit (2026-11-12)
+# Secrets — never committed (the standard block; checked by Projects/check_gitignores.py — 2026-11-12)
 .claude/settings.local.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
